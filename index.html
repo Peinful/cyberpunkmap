@@ -46,6 +46,8 @@
   #modalTitle { margin:0 0 6px; color:var(--yellow); font-size:20px; letter-spacing:1px; padding-right:36px; }
   #modalDesc { margin:0; white-space:pre-wrap; line-height:1.45; }
   #modalMeta { margin-top:10px; font-size:11px; color:#889; }
+  #modalDelete { margin-top:12px; padding:8px 14px; background:var(--pink); color:#fff; border:0; font-weight:700; letter-spacing:1px; text-transform:uppercase; cursor:pointer; }
+  #modalDelete[hidden] { display:none; }
   #modalSwatch { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; }
 </style>
 </head>
@@ -75,6 +77,7 @@
       <h2 id="modalTitle"></h2>
       <p id="modalDesc"></p>
       <div id="modalMeta"><span id="modalSwatch"></span><span id="modalDate"></span></div>
+      <button id="modalDelete">Delete pin</button>
     </div>
   </div>
 </div>
@@ -82,7 +85,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>
 /* ================= CONFIG — EDIT THESE ================= */
-const DB_URL = "https://cyberpunk-map-interactive-default-rtdb.asia-southeast1.firebasedatabase.app/"; // Firebase Realtime Database URL, no trailing slash
+const DB_URL = "https://YOUR-PROJECT-default-rtdb.firebaseio.com"; // Firebase Realtime Database URL, no trailing slash
 const MAP_IMAGE = "map.jpg";   // your map image, in the same folder (size is detected automatically)
 const POLL_MS = 10000;         // how often to refresh pins from other users
 /* ======================================================= */
@@ -160,12 +163,22 @@ async function fetchImage(id){
   return /^data:image\/jpeg;base64,/.test(d || "") ? d : "";
 }
 
+/* ---- Delete (anyone can, after confirming) ---- */
+async function deletePin(p){
+  const r = await fetch(`${DB_URL}/pins/${encodeURIComponent(p.id)}.json`, { method:"DELETE" });
+  if(!r.ok) throw new Error("Delete failed ("+r.status+") — check your database rules");
+  if(p.image_id) await fetch(`${DB_URL}/images/${encodeURIComponent(p.image_id)}.json`, { method:"DELETE" });
+  const m = known.get(p.id);
+  if(m){ map.removeLayer(m); known.delete(p.id); updateCount(); }
+}
+
 /* ---- Modal ---- */
 const modal = document.getElementById("modal");
 const modalImg = document.getElementById("modalImg");
-let modalToken = 0;
+let modalToken = 0, currentPin = null;
 async function openModal(p){
   const token = ++modalToken;
+  currentPin = p;
   document.getElementById("modalTitle").textContent = p.name || "";
   document.getElementById("modalDesc").textContent = p.description || "";
   document.getElementById("modalDate").textContent = p.created_at ? new Date(p.created_at).toLocaleString() : "";
@@ -179,6 +192,11 @@ async function openModal(p){
 }
 function closeModal(){ modalToken++; modal.classList.remove("open"); modalImg.removeAttribute("src"); }
 document.getElementById("modalClose").onclick = closeModal;
+document.getElementById("modalDelete").onclick = async () => {
+  if(!currentPin || !confirm('Delete "' + currentPin.name + '" for everyone? This cannot be undone.')) return;
+  try { await deletePin(currentPin); closeModal(); setStatus("Pin deleted."); }
+  catch(e){ setStatus(e.message, true); closeModal(); }
+};
 modal.addEventListener("click", e => { if(e.target === modal) closeModal(); });
 document.addEventListener("keydown", e => {
   if(e.key !== "Escape") return;
@@ -194,10 +212,17 @@ function addMarker(p){
   m.bindTooltip(esc(p.name), { permanent:true, direction:"right", offset:[14,-14], className:"pin-label" });
   m.on("click", () => { if(!placing) openModal(p); });
   known.set(p.id, m);
-  document.getElementById("count").textContent = known.size + " pin" + (known.size===1?"":"s");
+  updateCount();
 }
+function updateCount(){ document.getElementById("count").textContent = known.size + " pin" + (known.size===1?"":"s"); }
 async function refresh(){
-  try { (await fetchPins()).forEach(addMarker); }
+  try {
+    const pins = await fetchPins();
+    pins.forEach(addMarker);
+    const live = new Set(pins.map(p => p.id));
+    for(const [id, m] of known) if(!live.has(id)){ map.removeLayer(m); known.delete(id); }
+    updateCount();
+  }
   catch(e){ setStatus(e.message, true); }
 }
 
