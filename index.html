@@ -1,0 +1,261 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Night City Interactive Map</title>
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  :root { --bg:#0b0b12; --panel:#14141f; --yellow:#fcee09; --cyan:#00f0ff; --pink:#ff2a6d; --text:#e8e8f0; }
+  * { box-sizing:border-box; }
+  html,body { margin:0; height:100%; background:var(--bg); color:var(--text); font-family:"Segoe UI",Arial,sans-serif; }
+  #map { position:absolute; inset:0; background:#05050a; }
+  body.placing .leaflet-container { cursor:crosshair; }
+
+  #panel { position:absolute; top:12px; left:12px; z-index:1000; width:270px; max-height:calc(100% - 24px); overflow:auto; background:var(--panel);
+    border:1px solid var(--yellow); box-shadow:0 0 18px rgba(252,238,9,.25); padding:12px; }
+  #panel h1 { margin:0 0 8px; font-size:16px; letter-spacing:2px; color:var(--yellow); text-transform:uppercase; }
+  #panel label { display:block; font-size:12px; margin:8px 0 3px; color:var(--cyan); text-transform:uppercase; letter-spacing:1px; }
+  #panel input[type=text], #panel textarea { width:100%; background:#0b0b12; color:var(--text); border:1px solid #333; padding:6px; font:inherit; }
+  #panel input[type=file] { width:100%; font-size:12px; color:#9aa; }
+  #panel textarea { resize:vertical; min-height:50px; }
+  #panel input:focus, #panel textarea:focus { outline:1px solid var(--cyan); }
+  #colors { display:flex; flex-wrap:wrap; gap:6px; }
+  .swatch { width:24px; height:24px; border:2px solid transparent; border-radius:50%; cursor:pointer; }
+  .swatch.sel { border-color:#fff; box-shadow:0 0 8px currentColor; }
+  button.main { margin-top:10px; width:100%; padding:9px; background:var(--yellow); color:#000; border:0; font-weight:700; letter-spacing:1px; text-transform:uppercase; cursor:pointer; }
+  button.main.active { background:var(--pink); color:#fff; }
+  button.main:disabled { opacity:.5; cursor:not-allowed; }
+  #status { margin-top:8px; font-size:12px; min-height:16px; color:#9aa; }
+  #status.err { color:var(--pink); }
+  #count { font-size:12px; color:#9aa; margin-top:4px; }
+
+  .pin { width:26px; height:26px; transform:rotate(-45deg); border-radius:50% 50% 50% 0; border:2px solid #000; box-shadow:0 0 8px rgba(0,0,0,.8); cursor:pointer; position:relative; }
+  .pin::after { content:""; position:absolute; width:8px; height:8px; background:#000; border-radius:50%; top:7px; left:7px; opacity:.6; }
+  .pin-label { background:rgba(10,10,18,.85); color:#fff; border:1px solid #444; font-size:11px; padding:1px 5px; box-shadow:none; }
+  .pin-label::before { display:none; }
+
+  /* Pin modal */
+  #modal { position:fixed; inset:0; z-index:5000; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,.75); padding:16px; }
+  #modal.open { display:flex; }
+  #modalBox { position:relative; width:min(720px,100%); max-height:100%; overflow:auto; background:var(--panel); border:1px solid var(--yellow); box-shadow:0 0 30px rgba(252,238,9,.3); }
+  #modalClose { position:absolute; top:8px; right:8px; width:32px; height:32px; background:var(--pink); color:#fff; border:0; font-size:18px; cursor:pointer; z-index:2; }
+  #modalImg { display:block; width:100%; max-height:60vh; object-fit:contain; background:#000; }
+  #modalImg[hidden] { display:none; }
+  #modalBody { padding:14px 16px 16px; }
+  #modalTitle { margin:0 0 6px; color:var(--yellow); font-size:20px; letter-spacing:1px; padding-right:36px; }
+  #modalDesc { margin:0; white-space:pre-wrap; line-height:1.45; }
+  #modalMeta { margin-top:10px; font-size:11px; color:#889; }
+  #modalSwatch { display:inline-block; width:10px; height:10px; border-radius:50%; margin-right:6px; }
+</style>
+</head>
+<body>
+<div id="map"></div>
+
+<div id="panel">
+  <h1>Night City Map</h1>
+  <label for="pname">Pin name</label>
+  <input type="text" id="pname" maxlength="40" placeholder="e.g. Afterlife Bar">
+  <label for="pdesc">Description (optional)</label>
+  <textarea id="pdesc" maxlength="500"></textarea>
+  <label for="pimg">Image (optional)</label>
+  <input type="file" id="pimg" accept="image/*">
+  <label>Colour</label>
+  <div id="colors"></div>
+  <button class="main" id="placeBtn">Place pin</button>
+  <div id="status"></div>
+  <div id="count"></div>
+</div>
+
+<div id="modal" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+  <div id="modalBox">
+    <button id="modalClose" aria-label="Close">&#10005;</button>
+    <img id="modalImg" alt="" hidden>
+    <div id="modalBody">
+      <h2 id="modalTitle"></h2>
+      <p id="modalDesc"></p>
+      <div id="modalMeta"><span id="modalSwatch"></span><span id="modalDate"></span></div>
+    </div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+/* ================= CONFIG — EDIT THESE ================= */
+const DB_URL = "https://YOUR-PROJECT-default-rtdb.firebaseio.com"; // Firebase Realtime Database URL, no trailing slash
+const MAP_IMAGE = "map.jpg";   // your map image, in the same folder (size is detected automatically)
+const POLL_MS = 10000;         // how often to refresh pins from other users
+/* ======================================================= */
+
+const COLORS = ["#fcee09","#00f0ff","#ff2a6d","#39ff14","#ff9f1c","#b967ff","#ffffff","#ff4040"];
+let selectedColor = COLORS[0];
+let placing = false;
+let map, IMG_W, IMG_H;
+const known = new Map(); // id -> marker
+
+const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const safeColor = c => /^#[0-9a-fA-F]{6}$/.test(c) ? c : "#fcee09";
+
+/* ---- Status helper ---- */
+const statusEl = document.getElementById("status");
+function setStatus(msg, err=false){ statusEl.textContent = msg; statusEl.className = err ? "err" : ""; }
+
+/* ---- Colour swatches ---- */
+const colorBox = document.getElementById("colors");
+COLORS.forEach((c,i) => {
+  const d = document.createElement("div");
+  d.className = "swatch" + (i===0 ? " sel" : "");
+  d.style.background = c; d.style.color = c;
+  d.onclick = () => { selectedColor = c; document.querySelectorAll(".swatch").forEach(s=>s.classList.remove("sel")); d.classList.add("sel"); };
+  colorBox.appendChild(d);
+});
+
+/* ---- Firebase Realtime Database (REST, no SDK) ---- */
+async function fetchPins(){
+  const r = await fetch(`${DB_URL}/pins.json`);
+  if(!r.ok) throw new Error("Load failed ("+r.status+")");
+  const data = await r.json() || {};
+  return Object.entries(data).map(([id, v]) => ({ id, ...v })).sort((a,b) => (a.created_at||0) - (b.created_at||0));
+}
+async function savePin(pin){
+  const r = await fetch(`${DB_URL}/pins.json`, { method:"POST", body:JSON.stringify({ ...pin, created_at:{".sv":"timestamp"} }) });
+  if(!r.ok) throw new Error("Save failed ("+r.status+")");
+  const { name: id } = await r.json();
+  const r2 = await fetch(`${DB_URL}/pins/${id}/created_at.json`);
+  return { id, ...pin, created_at: r2.ok ? await r2.json() : Date.now() };
+}
+
+/* ---- Images: shrink in the browser, stored as small JPEGs in the database ---- */
+function shrinkImage(file){
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      for (const [side, q] of [[1024,0.72],[800,0.6],[640,0.5]]) {
+        const scale = Math.min(1, side / Math.max(img.width, img.height));
+        const c = document.createElement("canvas");
+        c.width = Math.round(img.width * scale); c.height = Math.round(img.height * scale);
+        c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
+        const data = c.toDataURL("image/jpeg", q);
+        if (data.length < 450000) return resolve(data);
+      }
+      reject(new Error("Image is too detailed — try a smaller one"));
+    };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error("That file isn't a readable image")); };
+    img.src = url;
+  });
+}
+async function uploadImage(file){
+  const data = await shrinkImage(file);
+  const id = Date.now().toString(36) + Math.random().toString(36).slice(2,10);
+  const r = await fetch(`${DB_URL}/images/${id}.json`, { method:"PUT", body:JSON.stringify(data) });
+  if(!r.ok) throw new Error("Image upload failed ("+r.status+")");
+  return id;
+}
+async function fetchImage(id){
+  const r = await fetch(`${DB_URL}/images/${encodeURIComponent(id)}.json`);
+  if(!r.ok) return "";
+  const d = await r.json();
+  return /^data:image\/jpeg;base64,/.test(d || "") ? d : "";
+}
+
+/* ---- Modal ---- */
+const modal = document.getElementById("modal");
+const modalImg = document.getElementById("modalImg");
+let modalToken = 0;
+async function openModal(p){
+  const token = ++modalToken;
+  document.getElementById("modalTitle").textContent = p.name || "";
+  document.getElementById("modalDesc").textContent = p.description || "";
+  document.getElementById("modalDate").textContent = p.created_at ? new Date(p.created_at).toLocaleString() : "";
+  document.getElementById("modalSwatch").style.background = safeColor(p.color);
+  modalImg.removeAttribute("src"); modalImg.hidden = true;
+  modal.classList.add("open");
+  if(p.image_id){
+    const src = await fetchImage(p.image_id);
+    if(src && token === modalToken){ modalImg.src = src; modalImg.alt = p.name || ""; modalImg.hidden = false; }
+  }
+}
+function closeModal(){ modalToken++; modal.classList.remove("open"); modalImg.removeAttribute("src"); }
+document.getElementById("modalClose").onclick = closeModal;
+modal.addEventListener("click", e => { if(e.target === modal) closeModal(); });
+document.addEventListener("keydown", e => {
+  if(e.key !== "Escape") return;
+  if(modal.classList.contains("open")) closeModal();
+  else if(placing){ stopPlacing(); setStatus(""); }
+});
+
+/* ---- Pins ---- */
+function addMarker(p){
+  if(known.has(p.id)) return;
+  const icon = L.divIcon({ className:"", html:`<div class="pin" style="background:${safeColor(p.color)}"></div>`, iconSize:[26,26], iconAnchor:[4,30] });
+  const m = L.marker([p.y, p.x], { icon, bubblingMouseEvents:false }).addTo(map);
+  m.bindTooltip(esc(p.name), { permanent:true, direction:"right", offset:[14,-14], className:"pin-label" });
+  m.on("click", () => { if(!placing) openModal(p); });
+  known.set(p.id, m);
+  document.getElementById("count").textContent = known.size + " pin" + (known.size===1?"":"s");
+}
+async function refresh(){
+  try { (await fetchPins()).forEach(addMarker); }
+  catch(e){ setStatus(e.message, true); }
+}
+
+/* ---- Placing pins ---- */
+const placeBtn = document.getElementById("placeBtn");
+placeBtn.onclick = () => {
+  const name = document.getElementById("pname").value.trim();
+  if(!placing){
+    if(!name){ setStatus("Enter a pin name first.", true); return; }
+    placing = true; document.body.classList.add("placing");
+    placeBtn.textContent = "Cancel"; placeBtn.classList.add("active");
+    setStatus("Click the map to drop your pin.");
+  } else stopPlacing();
+};
+function stopPlacing(){
+  placing = false; document.body.classList.remove("placing");
+  placeBtn.textContent = "Place pin"; placeBtn.classList.remove("active");
+}
+let lastPlaced = 0;
+async function onMapClick(e){
+  if(!placing) return;
+  if(Date.now() - lastPlaced < 5000){ setStatus("Slow down — wait a few seconds.", true); return; }
+  const name = document.getElementById("pname").value.trim().slice(0,40);
+  const description = document.getElementById("pdesc").value.trim().slice(0,500);
+  const file = document.getElementById("pimg").files[0];
+  if(!name) return;
+  const x = Math.round(e.latlng.lng), y = Math.round(e.latlng.lat);
+  if(x < 0 || y < 0 || x > IMG_W || y > IMG_H){ setStatus("Click inside the map.", true); return; }
+  stopPlacing(); placeBtn.disabled = true;
+  try {
+    const pin = { name, description, color:selectedColor, x, y };
+    if(file){ setStatus("Uploading image…"); pin.image_id = await uploadImage(file); }
+    setStatus("Saving…");
+    const saved = await savePin(pin);
+    lastPlaced = Date.now();
+    addMarker(saved);
+    document.getElementById("pname").value = ""; document.getElementById("pdesc").value = ""; document.getElementById("pimg").value = "";
+    setStatus("Pin saved — everyone can see it.");
+  } catch(err){ setStatus(err.message, true); }
+  placeBtn.disabled = false;
+}
+
+/* ---- Start: read the image's real size, then build the map ---- */
+const probe = new Image();
+probe.onload = () => {
+  IMG_W = probe.naturalWidth; IMG_H = probe.naturalHeight;
+  const bounds = [[0,0],[IMG_H,IMG_W]];
+  map = L.map("map", { crs:L.CRS.Simple, minZoom:-5, maxZoom:3, zoomSnap:0.25, zoomDelta:0.5, maxBoundsViscosity:0.8, attributionControl:false });
+  L.imageOverlay(MAP_IMAGE, bounds).addTo(map);
+  map.fitBounds(bounds);
+  map.setMinZoom(map.getBoundsZoom(bounds) - 1);
+  map.setMaxBounds(L.latLngBounds(bounds).pad(0.25));
+  map.on("click", onMapClick);
+  refresh();
+  setInterval(refresh, POLL_MS);
+};
+probe.onerror = () => setStatus("Could not load " + MAP_IMAGE + " — check it's in the same folder as index.html.", true);
+probe.src = MAP_IMAGE;
+</script>
+</body>
+</html>
